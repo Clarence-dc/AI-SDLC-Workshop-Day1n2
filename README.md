@@ -1,3 +1,12 @@
+# Implemented application
+
+The Next.js application source is now included. See [IMPLEMENTATION.md](IMPLEMENTATION.md) for the full comparison of PRP `00` with features `01`–`11`, implementation choices, and verification commands.
+
+To run locally: `npm install`, configure `.env.local` from `.env.example`, `npm run seed:holidays`, then `npm run dev`. This implementation session has already generated an ignored local environment file. Open **http://localhost:3000** and create a passkey account.
+
+---
+
+
 # Complete Setup Guide: Todo App Development with GitHub Copilot
 
 This walkthrough will guide you from zero to running the Todo App with GitHub Copilot assistance.

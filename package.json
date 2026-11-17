@@ -1,0 +1,42 @@
+{
+  "name": "singapore-todo",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "next typegen && tsc --noEmit",
+    "test": "tsx --test tests/unit/*.test.ts",
+    "test:e2e": "playwright test",
+    "seed:holidays": "tsx scripts/seed-holidays.ts",
+    "preview:capture": "tsx scripts/capture-previews.ts",
+    "format": "prettier --write app lib tests scripts middleware.ts playwright.config.ts next.config.ts"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "^13.2.2",
+    "@simplewebauthn/server": "^13.2.2",
+    "better-sqlite3": "^12.4.1",
+    "jose": "^6.1.0",
+    "next": "^16.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "eslint": "^9.39.0",
+    "eslint-config-next": "^16.0.0",
+    "prettier": "^3.10.1",
+    "tailwindcss": "^4.1.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "type": "module"
+}

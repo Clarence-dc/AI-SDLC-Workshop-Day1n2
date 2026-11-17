@@ -2,9 +2,9 @@
 
 ## ⚠️ Current Repository State
 
-This repository currently contains **planning and reference documentation only** — `README.md`, `USER_GUIDE.md`, `EVALUATION.md`, `PRPs/*.md`, and `.github/copilot-instructions.md` describe the **target implementation** of a Todo App. The actual Next.js source code (`app/`, `lib/`, `middleware.ts`, `package.json`, `tests/`, etc.) does not exist in this repo yet.
+The application is implemented in `app/`, `lib/`, `middleware.ts`, and `tests/`. See `IMPLEMENTATION.md` for the comparison against all 11 PRPs, setup, design choices and verification. `PRPs/00-one-shot-implementation.md` controls conflicts with the longer feature documents.
 
-Everything below describes the architecture and conventions the app **must follow once implemented**. When asked to build or extend a feature, scaffold the project structure described here rather than assuming it already exists — check with `ls`/`find` first.
+The architecture and conventions below apply to the existing implementation.
 
 ## Architecture Overview
 
