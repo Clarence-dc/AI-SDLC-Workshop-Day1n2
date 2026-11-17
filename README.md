@@ -669,3 +669,66 @@ For questions or issues, refer to the troubleshooting section or ask Copilot Cha
 ```
 @workspace I'm having trouble with [describe issue]
 ```
+
+### PRP11 passkey authentication
+
+The authentication implementation uses verified JWT sessions through `lib/auth.ts`.
+Set `JWT_SECRET` in `.env.local` to a cryptographically random value of at least
+32 bytes (see `.env.example`). There is no default secret or development-user
+bypass. Sessions use the `session` HTTP-only, SameSite=Lax cookie, Secure in
+production, with a seven-day expiry.
+
+Set `RP_ORIGIN` to the exact browser origin (scheme, hostname and port, without a
+trailing slash), `RP_ID` to its relying-party domain (no scheme or port), and
+`RP_NAME` to the displayed app name. Development defaults target
+`http://localhost:3000`; production requires explicit HTTPS configuration.
+
+Visit `/login` to register or sign in. The protected home page supports logout
+and adding a second passkey through authenticated `/api/auth/enroll-options`
+and `/api/auth/enroll-verify` requests. `/api/auth/me` returns
+`{user:{id,username}}` or `401 {error:string}`. POST requests require a matching
+Origin header; JSON endpoints accept at most 64 KiB. WebAuthn challenges are
+browser-cookie-bound, account/purpose-bound, single-use, and expire after five
+minutes. Unknown-user login options do not disclose whether the user exists.
+Losing all passkeys has no recovery path in this release.
+
+Authentication and todo data are stored synchronously in `todos.db` in the working directory.
+Set `DATABASE_PATH` to an absolute SQLite file path on persistent storage when
+deploying. The parent directory must already exist. User/credential registration
+is transactional; challenge consumption deletes and returns the row atomically.
+Run database tests with `node --import tsx --test tests/auth-db.test.ts`; they
+use an isolated in-memory database and never modify the application's data.
+Automated fixtures can use `signSessionToken({ userId, username })` for real
+database users without adding any token-issuing test endpoint to the app.
+Run session tests with `node --import tsx --test tests/auth-session.test.ts`.
+Against an isolated running server/database, set `AUTH_TEST_ORIGIN` to that
+server's origin and run `node --import tsx --test tests/webauthn-api.test.ts`
+for cryptographically signed WebAuthn protocol checks (not browser/device tests).
+
+### PRP01 authenticated todos
+
+`GET /api/todos` returns a bare array, and `GET /api/todos/:id` returns a todo.
+`POST /api/todos` returns the created todo with status 201; `PUT /api/todos/:id`
+returns `{todo}`; `DELETE /api/todos/:id` returns `{success:true}`.
+All routes require a verified session and scope access to its user; missing or
+other-user IDs return 404. Writes require an Origin matching `RP_ORIGIN` (or
+the request origin when unset). Errors use `{error:string}`.
+
+Titles are trimmed and required. Priority defaults to medium. Updates preserve
+omitted fields; null clears nullable values. Unknown fields and invalid types
+are rejected. Due dates require an explicit timezone and are normalized to UTC
+ISO strings. Newly assigned or changed dates must be at least 60 seconds ahead
+of server time; unchanged overdue dates do not block other edits. Linked tags
+must belong to the same user. Deleting a todo removes its subtasks and tag
+links, not reusable tags. Recurrence/reminder metadata is stored, but generation
+and notification scheduling are not implemented in PRP01.
+
+Run backend CRUD regression checks with
+`node --import tsx --test tests/todo-db.test.ts`; they use and remove an isolated
+temporary database. This includes persistence, user isolation, atomic relations,
+deletion cascades, input validation, and exact due-date boundaries.
+After `npm run build`, run
+`node --import tsx --test tests/todo-api.test.ts` for the HTTP contract, session
+checks, cross-user access, and request-origin protection. This starts and stops
+its own local production server with an isolated temporary database and signing
+key; it does not use or change application accounts.
