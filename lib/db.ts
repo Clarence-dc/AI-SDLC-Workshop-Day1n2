@@ -15,6 +15,15 @@ export interface Subtask {
   created_at: string;
 }
 
+export interface CreateSubtaskDto {
+  title: string;
+}
+
+export interface UpdateSubtaskDto {
+  title?: string;
+  completed?: boolean;
+}
+
 export interface Tag {
   id: number;
   user_id: number;
@@ -155,7 +164,6 @@ function database(): Database.Database {
       position INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
     );
-    CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id);
     CREATE TABLE IF NOT EXISTS tags (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -182,8 +190,138 @@ function database(): Database.Database {
       `);
     }
   }).immediate();
+  try {
+    migrateSubtasks(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   connection = db;
   return db;
+}
+
+function migrateSubtasks(db: Database.Database): void {
+  const inspectSchema = () => {
+    const columns = db.pragma("table_info(subtasks)") as Array<{ name: string }>;
+    const names = new Set(columns.map(({ name }) => name));
+    const required = ["id", "todo_id", "title"];
+    const missingRequired = required.filter((name) => !names.has(name));
+    const foreignKeys = db.pragma("foreign_key_list(subtasks)") as Array<{
+      table: string; from: string; to: string; on_delete: string;
+    }>;
+    const hasCascade = foreignKeys.some(({ table, from, to, on_delete }) =>
+      table === "todos" && from === "todo_id" && to === "id" && on_delete.toUpperCase() === "CASCADE");
+    const unexpectedForeignKeys = foreignKeys.some(({ table, from, to, on_delete }) =>
+      !(table === "todos" && from === "todo_id" && to === "id" && on_delete.toUpperCase() === "CASCADE"));
+    const invalidRows = names.has("todo_id") && names.has("title")
+      ? (db.prepare(`
+          SELECT COUNT(*) AS count FROM subtasks WHERE todo_id IS NULL OR title IS NULL
+        `).get() as { count: number }).count
+      : 0;
+    const orphanCount = names.has("todo_id")
+      ? (db.prepare(`
+          SELECT COUNT(*) AS count FROM subtasks s
+          WHERE s.todo_id IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM todos t WHERE t.id = s.todo_id)
+        `).get() as { count: number }).count
+      : 0;
+    const unsupportedObjects = !hasCascade
+      ? db.prepare(`
+          SELECT type, name FROM sqlite_master
+          WHERE tbl_name = 'subtasks'
+            AND (type = 'trigger' OR (type = 'index' AND name != 'idx_subtasks_todo_id'))
+        `).all() as Array<{ type: string; name: string }>
+      : [];
+    const hasIndex = db.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_subtasks_todo_id'
+    `).get();
+    const hasNullDates = names.has("created_at")
+      && db.prepare("SELECT 1 FROM subtasks WHERE created_at IS NULL LIMIT 1").get();
+    return {
+      names,
+      hasCascade,
+      missingRequired,
+      unexpectedForeignKeys,
+      invalidRows,
+      orphanCount,
+      unsupportedObjects,
+      needsMigration: missingRequired.length > 0 || !names.has("completed") || !names.has("position")
+        || !names.has("created_at") || !hasCascade || !hasIndex || !!hasNullDates
+        || invalidRows > 0 || orphanCount > 0,
+    };
+  };
+  if (!inspectSchema().needsMigration) return;
+
+  db.transaction(() => {
+    const schema = inspectSchema();
+    if (schema.missingRequired.length > 0) {
+      throw new Error(
+        `Cannot migrate subtasks: required column(s) are missing (${schema.missingRequired.join(", ")}). ` +
+        "Restore or repair the subtask table before restarting the application.",
+      );
+    }
+    if (schema.invalidRows > 0) {
+      throw new Error(
+        `Cannot migrate subtasks: ${schema.invalidRows} row(s) have no parent todo or title. ` +
+        "Repair these rows before restarting the application; no subtask rows were changed.",
+      );
+    }
+    if (schema.orphanCount > 0) {
+      throw new Error(
+        `Cannot migrate subtasks: ${schema.orphanCount} row(s) reference missing todos. ` +
+        "Restore the referenced todos or repair the subtask references before restarting; no subtask rows were changed.",
+      );
+    }
+    if (!schema.hasCascade && schema.unexpectedForeignKeys) {
+      throw new Error(
+        "Cannot migrate subtasks: the legacy table has an unsupported foreign key. " +
+        "Repair the table schema before restarting the application.",
+      );
+    }
+    if (!schema.hasCascade && schema.unsupportedObjects.length > 0) {
+      const objectNames = schema.unsupportedObjects.map(({ name }) => name).join(", ");
+      throw new Error(
+        `Cannot migrate subtasks: custom index/trigger(s) would not be preserved (${objectNames}). ` +
+        "Preserve these database objects in a reviewed migration before restarting the application.",
+      );
+    }
+    const columns = db.pragma("table_info(subtasks)") as Array<{ name: string }>;
+    const names = new Set(columns.map(({ name }) => name));
+    if (!schema.hasCascade) {
+      const extraColumns = [...names].filter((name) =>
+        !["id", "todo_id", "title", "completed", "position", "created_at"].includes(name));
+      if (extraColumns.length > 0) {
+        throw new Error(
+          `Cannot migrate subtasks: unsupported column(s) would not be preserved (${extraColumns.join(", ")}). ` +
+          "Preserve these columns in a manual migration before restarting the application.",
+        );
+      }
+    }
+    if (!names.has("completed")) db.exec("ALTER TABLE subtasks ADD COLUMN completed INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("position")) db.exec("ALTER TABLE subtasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0");
+    if (!names.has("created_at")) db.exec("ALTER TABLE subtasks ADD COLUMN created_at TEXT");
+    db.exec("UPDATE subtasks SET created_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE created_at IS NULL");
+
+    if (!schema.hasCascade) {
+      db.exec(`
+        CREATE TABLE subtasks__migration (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          todo_id INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+          title TEXT NOT NULL,
+          completed INTEGER NOT NULL DEFAULT 0,
+          position INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO subtasks__migration(id, todo_id, title, completed, position, created_at)
+          SELECT id, todo_id, title, completed, position,
+            COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          FROM subtasks;
+        DROP TABLE subtasks;
+        ALTER TABLE subtasks__migration RENAME TO subtasks;
+      `);
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS idx_subtasks_todo_id ON subtasks(todo_id)");
+  }).immediate();
 }
 
 function authenticatorFromRow(row: AuthenticatorRow): Authenticator {
@@ -312,6 +450,66 @@ function setTodoTags(todoId: number, userId: number, ids: number[]): void {
   const attach = db.prepare("INSERT INTO todo_tags(todo_id, tag_id) VALUES (?, ?)");
   for (const id of new Set(ids)) attach.run(todoId, id);
 }
+
+function subtaskFromRow(row: Omit<Subtask, "completed"> & { completed: number }): Subtask {
+  return { ...row, completed: row.completed === 1 };
+}
+
+export const subtaskDB = {
+  findByTodoId(todoId: number, userId: number): Subtask[] {
+    const rows = database().prepare(`
+      SELECT s.* FROM subtasks s JOIN todos t ON t.id = s.todo_id
+      WHERE s.todo_id = ? AND t.user_id = ? ORDER BY s.position ASC, s.id ASC
+    `).all(todoId, userId) as Array<Omit<Subtask, "completed"> & { completed: number }>;
+    return rows.map(subtaskFromRow);
+  },
+  findById(id: number, userId: number): Subtask | undefined {
+    const row = database().prepare(`
+      SELECT s.* FROM subtasks s JOIN todos t ON t.id = s.todo_id
+      WHERE s.id = ? AND t.user_id = ?
+    `).get(id, userId) as (Omit<Subtask, "completed"> & { completed: number }) | undefined;
+    return row ? subtaskFromRow(row) : undefined;
+  },
+  create(todoId: number, userId: number, data: CreateSubtaskDto): Subtask | undefined {
+    const title = typeof data.title === "string" ? data.title.trim() : "";
+    if (!title) throw new TodoValidationError("Subtask title is required");
+    const db = database();
+    return db.transaction(() => {
+      if (!db.prepare("SELECT id FROM todos WHERE id = ? AND user_id = ?").get(todoId, userId)) {
+        return undefined;
+      }
+      const position = (db.prepare("SELECT COALESCE(MAX(position), -1) + 1 AS position FROM subtasks WHERE todo_id = ?")
+        .get(todoId) as { position: number }).position;
+      const result = db.prepare(`
+        INSERT INTO subtasks(todo_id, title, position, created_at) VALUES (?, ?, ?, ?)
+      `).run(todoId, title, position, getSingaporeNow().toISOString());
+      return this.findById(Number(result.lastInsertRowid), userId);
+    }).immediate();
+  },
+  update(id: number, userId: number, data: UpdateSubtaskDto): Subtask | undefined {
+    if (data.title !== undefined && (typeof data.title !== "string" || !data.title.trim())) {
+      throw new TodoValidationError("Subtask title is required");
+    }
+    if (data.completed !== undefined && typeof data.completed !== "boolean") {
+      throw new TodoValidationError("Subtask completed must be a boolean");
+    }
+    const db = database();
+    return db.transaction(() => {
+      const existing = this.findById(id, userId);
+      if (!existing) return undefined;
+      db.prepare("UPDATE subtasks SET title = ?, completed = ? WHERE id = ?")
+        .run(data.title === undefined ? existing.title : data.title.trim(),
+          data.completed === undefined ? (existing.completed ? 1 : 0) : (data.completed ? 1 : 0), id);
+      return this.findById(id, userId);
+    }).immediate();
+  },
+  delete(id: number, userId: number): boolean {
+    return database().prepare(`
+      DELETE FROM subtasks WHERE id = ?
+        AND todo_id IN (SELECT id FROM todos WHERE user_id = ?)
+    `).run(id, userId).changes === 1;
+  },
+};
 
 export const todoDB = {
   findAllByUser(userId: number): Todo[] {

@@ -13,7 +13,7 @@ if (!tempDir || !sessionFile || !databasePath || !jwtSecret) {
 
 export default defineConfig({
   testDir: "..",
-  testMatch: "03-priority.spec.ts",
+  testMatch: ["03-priority.spec.ts", "07-subtasks.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,
@@ -34,7 +34,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: "node --import tsx tests/e2e/priority-e2e-server.ts",
+    command: `node node_modules/next/dist/bin/next start -H 127.0.0.1 -p ${port}`,
     cwd: process.cwd(),
     url: `${origin}/login`,
     timeout: 120_000,

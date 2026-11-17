@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSession } from "./auth";
 import { todoDB, userDB } from "./db";
+import { isAllowedMutationOrigin } from "./requestOrigin";
 import { TodoValidationError } from "./todoValidation";
 
 type Action = "list" | "read" | "create" | "update" | "delete";
@@ -23,8 +24,7 @@ export async function handleTodoRequest(
       throw new TodoValidationError("Not authenticated", 401);
     }
     if (request.method !== "GET") {
-      const origin = process.env.RP_ORIGIN ?? new URL(request.url).origin;
-      if (request.headers.get("origin") !== origin) {
+      if (!isAllowedMutationOrigin(request)) {
         throw new TodoValidationError("Request origin not allowed", 403);
       }
     }

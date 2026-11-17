@@ -5,9 +5,11 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
-import type { Priority, Todo } from "@/lib/db";
+import type { Priority, Subtask, Todo } from "@/lib/db";
+import { calculateProgress } from "@/lib/subtaskProgress";
 import {
   fromSingaporeDateTimeInput,
   formatSingaporeDate,
@@ -21,7 +23,10 @@ import {
   type PriorityFilter,
 } from "@/lib/todoSort";
 
-type TodoView = Omit<Todo, "user_id"> & { user_id?: number };
+type TodoView = Omit<Todo, "user_id" | "subtasks"> & {
+  user_id?: number;
+  subtasks: Subtask[];
+};
 type TodoDraft = {
   title: string;
   dueDate: string;
@@ -35,12 +40,30 @@ const PRIORITY_BADGE_STYLES: Record<Priority, string> = {
     "border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-200",
   low: "border-blue-500 bg-blue-50 text-blue-800 dark:border-blue-400 dark:bg-blue-950 dark:text-blue-200",
 };
+let nextOptimisticSubtaskId = -1;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isTodo(value: unknown): value is Todo {
+function isSubtask(value: unknown, todoId?: number): value is Subtask {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.id) &&
+    Number(value.id) > 0 &&
+    Number.isSafeInteger(value.todo_id) &&
+    Number(value.todo_id) > 0 &&
+    (todoId === undefined || value.todo_id === todoId) &&
+    typeof value.title === "string" &&
+    typeof value.completed === "boolean" &&
+    Number.isSafeInteger(value.position) &&
+    Number(value.position) >= 0 &&
+    typeof value.created_at === "string" &&
+    Number.isFinite(Date.parse(value.created_at))
+  );
+}
+
+function isTodo(value: unknown): value is Todo & { subtasks: Subtask[] } {
   if (!isRecord(value)) {
     return false;
   }
@@ -69,11 +92,13 @@ function isTodo(value: unknown): value is Todo {
     (value.updated_at === null ||
       (typeof value.updated_at === "string" &&
         Number.isFinite(Date.parse(value.updated_at)))) &&
-    (value.due_date === null || Number.isFinite(Date.parse(value.due_date)))
+    (value.due_date === null || Number.isFinite(Date.parse(value.due_date))) &&
+    Array.isArray(value.subtasks) &&
+    value.subtasks.every((subtask) => isSubtask(subtask, Number(value.id)))
   );
 }
 
-function extractTodo(value: unknown): Todo | null {
+function extractTodo(value: unknown): TodoView | null {
   if (isTodo(value)) {
     return value;
   }
@@ -85,7 +110,7 @@ function extractTodo(value: unknown): Todo | null {
   return null;
 }
 
-async function fetchTodoList(signal?: AbortSignal): Promise<Todo[]> {
+async function fetchTodoList(signal?: AbortSignal): Promise<TodoView[]> {
   const response = await fetch("/api/todos", { signal });
   if (!response.ok) {
     throw new Error(await getErrorMessage(response, "Could not load todos."));
@@ -102,6 +127,324 @@ async function fetchTodoList(signal?: AbortSignal): Promise<Todo[]> {
   }
 
   return list;
+}
+
+function compareSubtasks(a: Subtask, b: Subtask): number {
+  return a.position - b.position || a.id - b.id;
+}
+
+function sortSubtasks(subtasks: Subtask[]): Subtask[] {
+  return [...subtasks].sort(compareSubtasks);
+}
+
+function subtaskPendingKey(todoId: number, subtaskId?: number): string {
+  return subtaskId === undefined
+    ? `add:${todoId}`
+    : `subtask:${todoId}:${subtaskId}`;
+}
+
+function SubtaskList({
+  todoId,
+  todoTitle,
+  subtasks,
+  pendingKeys,
+  onSubtasksChange,
+  registerRequest,
+}: {
+  todoId: number;
+  todoTitle: string;
+  subtasks: Subtask[];
+  pendingKeys: Set<string>;
+  onSubtasksChange: (update: (current: Subtask[]) => Subtask[]) => void;
+  registerRequest: (
+    todoId: number,
+    controller: AbortController,
+    lockKey: string,
+  ) => (() => void) | null;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
+  const { completed, total, percent } = calculateProgress(subtasks);
+  const panelId = `subtasks-${todoId}`;
+  const inputId = `subtask-title-${todoId}`;
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  async function addSubtask(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const title = newTitle.trim();
+    if (!title) {
+      setError("Subtask title is required.");
+      return;
+    }
+    const addKey = subtaskPendingKey(todoId);
+    if (todoId < 0 || pendingKeys.has(addKey)) {
+      return;
+    }
+
+    const optimisticId = nextOptimisticSubtaskId--;
+    const optimisticSubtask: Subtask = {
+      id: optimisticId,
+      todo_id: todoId,
+      title,
+      completed: false,
+      position: Math.max(-1, ...subtasks.map((subtask) => subtask.position)) + 1,
+      created_at: getSingaporeNow().toISOString(),
+    };
+    const controller = new AbortController();
+    const releaseRequest = registerRequest(todoId, controller, addKey);
+    if (!releaseRequest) {
+      return;
+    }
+
+    setError(null);
+    onSubtasksChange((current) => sortSubtasks([...current, optimisticSubtask]));
+
+    try {
+      const response = await fetch(`/api/todos/${todoId}/subtasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(await getErrorMessage(response, "Could not add subtask."));
+      }
+
+      const saved: unknown = await response.json();
+      if (!isSubtask(saved, todoId)) {
+        throw new Error("The server returned an invalid subtask.");
+      }
+
+      onSubtasksChange((current) =>
+        sortSubtasks(current.map((subtask) => subtask.id === optimisticId ? saved : subtask)),
+      );
+      if (mounted.current) {
+        setNewTitle("");
+      }
+    } catch (caught) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      onSubtasksChange((current) =>
+        current.filter((subtask) => subtask.id !== optimisticId),
+      );
+      if (mounted.current) {
+        setError(caught instanceof Error ? caught.message : "Could not add subtask.");
+      }
+    } finally {
+      releaseRequest();
+    }
+  }
+
+  async function toggleSubtask(subtask: Subtask, isCompleted: boolean) {
+    const lockKey = subtaskPendingKey(todoId, subtask.id);
+    if (subtask.id < 0 || pendingKeys.has(lockKey)) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const releaseRequest = registerRequest(todoId, controller, lockKey);
+    if (!releaseRequest) {
+      return;
+    }
+    setError(null);
+    onSubtasksChange((current) =>
+      current.map((item) => item.id === subtask.id ? { ...item, completed: isCompleted } : item),
+    );
+
+    try {
+      const response = await fetch(`/api/subtasks/${subtask.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ completed: isCompleted }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(await getErrorMessage(response, "Could not update subtask."));
+      }
+
+      const saved: unknown = await response.json();
+      if (!isSubtask(saved, todoId) || saved.id !== subtask.id) {
+        throw new Error("The server returned an invalid subtask.");
+      }
+      onSubtasksChange((current) =>
+        sortSubtasks(current.map((item) => item.id === subtask.id ? saved : item)),
+      );
+    } catch (caught) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      onSubtasksChange((current) =>
+        current.map((item) =>
+          item.id === subtask.id ? { ...item, completed: subtask.completed } : item,
+        ),
+      );
+      if (mounted.current) {
+        setError(caught instanceof Error ? caught.message : "Could not update subtask.");
+      }
+    } finally {
+      releaseRequest();
+    }
+  }
+
+  async function deleteSubtask(subtask: Subtask) {
+    const lockKey = subtaskPendingKey(todoId, subtask.id);
+    if (pendingKeys.has(lockKey)) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const releaseRequest = registerRequest(todoId, controller, lockKey);
+    if (!releaseRequest) {
+      return;
+    }
+    setError(null);
+    onSubtasksChange((current) => current.filter((item) => item.id !== subtask.id));
+
+    try {
+      const response = await fetch(`/api/subtasks/${subtask.id}`, {
+        method: "DELETE",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(await getErrorMessage(response, "Could not delete subtask."));
+      }
+
+      const body: unknown = await response.json();
+      if (!isRecord(body) || body.success !== true) {
+        throw new Error("The server returned an invalid subtask deletion response.");
+      }
+    } catch (caught) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      onSubtasksChange((current) =>
+        current.some((item) => item.id === subtask.id)
+          ? current
+          : sortSubtasks([...current, subtask]),
+      );
+      if (mounted.current) {
+        setError(caught instanceof Error ? caught.message : "Could not delete subtask.");
+      }
+    } finally {
+      releaseRequest();
+    }
+  }
+
+  return (
+    <div className="w-full border-t border-gray-100 pt-3 dark:border-gray-700">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <button
+          aria-controls={panelId}
+          aria-expanded={expanded}
+          className="min-h-9 rounded-md text-sm font-medium text-blue-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-blue-300"
+          onClick={() => setExpanded((current) => !current)}
+          type="button"
+        >
+          {expanded ? "Hide subtasks" : "Show subtasks"}
+        </button>
+        {total > 0 && (
+          <div aria-live="polite" aria-atomic="true" className="min-w-48 flex-1">
+            <div className="mb-1 flex justify-between gap-3 text-xs text-gray-600 dark:text-gray-300">
+              <span>{completed}/{total} subtasks</span>
+              <span>{percent}%</span>
+            </div>
+            <div
+              aria-label={`Subtask progress: ${completed} of ${total} complete (${percent}%)`}
+              aria-valuemax={100}
+              aria-valuemin={0}
+              aria-valuenow={percent}
+              className="h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700"
+              role="progressbar"
+            >
+              <div
+                className={`h-full rounded-full transition-[width] ${
+                  percent === 100 ? "bg-green-500" : "bg-blue-500"
+                }`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 space-y-3" hidden={!expanded} id={panelId}>
+        <form className="flex flex-col gap-2 sm:flex-row" onSubmit={addSubtask}>
+          <label className="sr-only" htmlFor={inputId}>
+            Add subtask to {todoTitle}
+          </label>
+          <input
+            autoComplete="off"
+            className="min-h-10 min-w-0 flex-1 rounded-lg border border-gray-300 bg-white px-3 text-gray-900 placeholder:text-gray-500 disabled:opacity-50 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+            disabled={pendingKeys.has(subtaskPendingKey(todoId)) || todoId < 0}
+            id={inputId}
+            onChange={(event) => setNewTitle(event.target.value)}
+            placeholder="Add a subtask"
+            value={newTitle}
+          />
+          <button
+            className="min-h-10 rounded-lg bg-blue-700 px-4 font-medium text-white hover:bg-blue-800 disabled:opacity-50 dark:bg-blue-600 dark:hover:bg-blue-500"
+            disabled={pendingKeys.has(subtaskPendingKey(todoId)) || todoId < 0}
+            type="submit"
+          >
+            Add
+          </button>
+        </form>
+
+        {subtasks.length > 0 && (
+          <ul aria-label={`${todoTitle} subtasks`} className="space-y-2 pl-1">
+            {subtasks.map((subtask) => {
+              const busy = pendingKeys.has(subtaskPendingKey(todoId, subtask.id));
+              return (
+                <li className="flex min-w-0 items-center gap-3" key={subtask.id}>
+                  <input
+                    aria-label={`Mark subtask "${subtask.title}" as ${subtask.completed ? "incomplete" : "complete"}`}
+                    checked={subtask.completed}
+                    className="h-4 w-4 shrink-0 accent-blue-600"
+                    disabled={busy || subtask.id < 0}
+                    onChange={(event) => void toggleSubtask(subtask, event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span
+                    className={`min-w-0 flex-1 break-words text-sm ${
+                      subtask.completed
+                        ? "text-gray-500 line-through dark:text-gray-400"
+                        : "text-gray-800 dark:text-gray-100"
+                    }`}
+                  >
+                    {subtask.title}
+                  </span>
+                  <button
+                    aria-label={`Delete subtask "${subtask.title}"`}
+                    className="min-h-9 min-w-9 rounded-md text-lg font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950"
+                    disabled={busy}
+                    onClick={() => void deleteSubtask(subtask)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+      </div>
+      {error && (
+        <p aria-live="assertive" className="mt-2 text-sm text-red-700 dark:text-red-300" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function formatDueDate(value: string): string {
@@ -187,65 +530,88 @@ function PriorityBadge({ priority }: { priority: Priority }) {
 function TodoItem({
   todo,
   busy,
+  pendingSubtaskKeys,
+  onSubtasksChange,
+  registerSubtaskRequest,
   onToggle,
   onEdit,
   onDelete,
 }: {
   todo: TodoView;
   busy: boolean;
+  pendingSubtaskKeys: Set<string>;
+  onSubtasksChange: (
+    todoId: number,
+    update: (current: Subtask[]) => Subtask[],
+  ) => void;
+  registerSubtaskRequest: (
+    todoId: number,
+    controller: AbortController,
+    lockKey: string,
+  ) => (() => void) | null;
   onToggle: (id: number, completed: boolean) => void;
   onEdit: (todo: TodoView) => void;
   onDelete: (todo: TodoView) => void;
 }) {
   return (
-    <li className="flex flex-col gap-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between dark:border-gray-700 dark:bg-gray-800">
-      <div className="flex min-w-0 items-start gap-3">
-        <input
-          aria-label={`Mark "${todo.title}" as ${todo.completed ? "incomplete" : "complete"}`}
-          checked={todo.completed}
-          className="mt-1 h-5 w-5 shrink-0 accent-blue-600"
-          disabled={busy || todo.id < 0}
-          onChange={(event) => onToggle(todo.id, event.target.checked)}
-          type="checkbox"
-        />
-        <div className="min-w-0">
-          <p
-            className={`break-words font-medium ${
-              todo.completed
-                ? "text-gray-500 line-through dark:text-gray-400"
-                : "text-gray-900 dark:text-white"
-            }`}
-          >
-            {todo.title}
-          </p>
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            <PriorityBadge priority={todo.priority} />
-            {todo.due_date && (
-              <span className="text-sm text-gray-600 dark:text-gray-300">
-                Due {formatDueDate(todo.due_date)}
-              </span>
-            )}
+    <li className="flex flex-col gap-4 rounded-xl border border-gray-200 bg-white p-4 shadow-sm dark:border-gray-700 dark:bg-gray-800">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-start gap-3">
+          <input
+            aria-label={`Mark "${todo.title}" as ${todo.completed ? "incomplete" : "complete"}`}
+            checked={todo.completed}
+            className="mt-1 h-5 w-5 shrink-0 accent-blue-600"
+            disabled={busy || todo.id < 0}
+            onChange={(event) => onToggle(todo.id, event.target.checked)}
+            type="checkbox"
+          />
+          <div className="min-w-0">
+            <p
+              className={`break-words font-medium ${
+                todo.completed
+                  ? "text-gray-500 line-through dark:text-gray-400"
+                  : "text-gray-900 dark:text-white"
+              }`}
+            >
+              {todo.title}
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <PriorityBadge priority={todo.priority} />
+              {todo.due_date && (
+                <span className="text-sm text-gray-600 dark:text-gray-300">
+                  Due {formatDueDate(todo.due_date)}
+                </span>
+              )}
+            </div>
           </div>
         </div>
+        <div className="flex shrink-0 gap-4 pl-8 text-sm sm:pl-0">
+          <button
+            className="font-medium text-blue-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-blue-300"
+            disabled={busy || todo.id < 0}
+            onClick={() => onEdit(todo)}
+            type="button"
+          >
+            Edit
+          </button>
+          <button
+            className="font-medium text-red-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-red-300"
+            disabled={busy || todo.id < 0}
+            onClick={() => onDelete(todo)}
+            type="button"
+          >
+            Delete
+          </button>
+        </div>
       </div>
-      <div className="flex shrink-0 gap-4 pl-8 text-sm sm:pl-0">
-        <button
-          className="font-medium text-blue-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-blue-300"
-          disabled={busy || todo.id < 0}
-          onClick={() => onEdit(todo)}
-          type="button"
-        >
-          Edit
-        </button>
-        <button
-          className="font-medium text-red-700 underline-offset-2 hover:underline disabled:opacity-50 dark:text-red-300"
-          disabled={busy || todo.id < 0}
-          onClick={() => onDelete(todo)}
-          type="button"
-        >
-          Delete
-        </button>
-      </div>
+      <SubtaskList
+        onSubtasksChange={(update) => onSubtasksChange(todo.id, update)}
+        pendingKeys={pendingSubtaskKeys}
+        registerRequest={registerSubtaskRequest}
+        subtasks={todo.subtasks}
+        todoId={todo.id}
+        todoTitle={todo.title}
+      />
     </li>
   );
 }
@@ -254,6 +620,9 @@ function TodoSection({
   title,
   todos,
   pendingIds,
+  pendingSubtaskKeys,
+  onSubtasksChange,
+  registerSubtaskRequest,
   onToggle,
   onEdit,
   onDelete,
@@ -261,6 +630,16 @@ function TodoSection({
   title: string;
   todos: TodoView[];
   pendingIds: Set<number>;
+  pendingSubtaskKeys: Set<string>;
+  onSubtasksChange: (
+    todoId: number,
+    update: (current: Subtask[]) => Subtask[],
+  ) => void;
+  registerSubtaskRequest: (
+    todoId: number,
+    controller: AbortController,
+    lockKey: string,
+  ) => (() => void) | null;
   onToggle: (id: number, completed: boolean) => void;
   onEdit: (todo: TodoView) => void;
   onDelete: (todo: TodoView) => void;
@@ -290,7 +669,10 @@ function TodoSection({
             key={todo.id}
             onDelete={onDelete}
             onEdit={onEdit}
+            onSubtasksChange={onSubtasksChange}
             onToggle={onToggle}
+            pendingSubtaskKeys={pendingSubtaskKeys}
+            registerSubtaskRequest={registerSubtaskRequest}
             todo={todo}
           />
         ))}
@@ -311,8 +693,13 @@ export default function HomePage() {
   const [isCreating, setIsCreating] = useState(false);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [pendingIds, setPendingIds] = useState<Set<number>>(() => new Set());
+  const [pendingSubtaskKeys, setPendingSubtaskKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(getSingaporeNow);
+  const subtaskRequests = useRef(new Map<number, Set<AbortController>>());
+  const subtaskLocks = useRef(new Set<string>());
 
   const loadTodos = useCallback(async (signal?: AbortSignal) => {
     setLoading(true);
@@ -406,6 +793,49 @@ export default function HomePage() {
     });
   }
 
+  const registerSubtaskRequest = useCallback(
+    (todoId: number, controller: AbortController, lockKey: string) => {
+      if (subtaskLocks.current.has(lockKey)) {
+        return null;
+      }
+      subtaskLocks.current.add(lockKey);
+      setPendingSubtaskKeys((current) => new Set(current).add(lockKey));
+
+      let controllers = subtaskRequests.current.get(todoId);
+      if (!controllers) {
+        controllers = new Set();
+        subtaskRequests.current.set(todoId, controllers);
+      }
+      controllers.add(controller);
+
+      return () => {
+        subtaskLocks.current.delete(lockKey);
+        setPendingSubtaskKeys((current) => {
+          const next = new Set(current);
+          next.delete(lockKey);
+          return next;
+        });
+        const current = subtaskRequests.current.get(todoId);
+        current?.delete(controller);
+        if (current?.size === 0) {
+          subtaskRequests.current.delete(todoId);
+        }
+      };
+    },
+    [],
+  );
+
+  function updateTodoSubtasks(
+    todoId: number,
+    update: (current: Subtask[]) => Subtask[],
+  ) {
+    setTodos((current) =>
+      current.map((todo) =>
+        todo.id === todoId ? { ...todo, subtasks: update(todo.subtasks) } : todo,
+      ),
+    );
+  }
+
   async function createTodo(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const trimmedTitle = title.trim();
@@ -438,6 +868,7 @@ export default function HomePage() {
       last_notification_sent: null,
       created_at: getSingaporeNow().toISOString(),
       updated_at: null,
+      subtasks: [],
     };
 
     setError(null);
@@ -512,11 +943,17 @@ export default function HomePage() {
       }
 
       setTodos((current) =>
-        current.map((todo) => (todo.id === id ? updated : todo)),
+        current.map((todo) =>
+          todo.id === id ? { ...updated, subtasks: todo.subtasks } : todo,
+        ),
       );
     } catch (caught) {
       setTodos((current) =>
-        current.map((todo) => (todo.id === id ? previousTodo : todo)),
+        current.map((todo) =>
+          todo.id === id
+            ? { ...previousTodo, subtasks: todo.subtasks }
+            : todo,
+        ),
       );
       setError(caught instanceof Error ? caught.message : "Could not update todo.");
     } finally {
@@ -615,7 +1052,9 @@ export default function HomePage() {
 
       setTodos((current) =>
         current.map((todo) =>
-          todo.id === previousTodo.id ? updated : todo,
+          todo.id === previousTodo.id
+            ? { ...updated, subtasks: todo.subtasks }
+            : todo,
         ),
       );
       setEditingTodo(null);
@@ -623,7 +1062,9 @@ export default function HomePage() {
     } catch (caught) {
       setTodos((current) =>
         current.map((todo) =>
-          todo.id === previousTodo.id ? previousTodo : todo,
+          todo.id === previousTodo.id
+            ? { ...previousTodo, subtasks: todo.subtasks }
+            : todo,
         ),
       );
       setError(caught instanceof Error ? caught.message : "Could not update todo.");
@@ -635,6 +1076,10 @@ export default function HomePage() {
 
   async function deleteTodo(todo: TodoView) {
     const index = todos.findIndex((item) => item.id === todo.id);
+    for (const controller of subtaskRequests.current.get(todo.id) ?? []) {
+      controller.abort();
+    }
+    subtaskRequests.current.delete(todo.id);
     setError(null);
     markTodoPending(todo.id, true);
     setTodos((current) => current.filter((item) => item.id !== todo.id));
@@ -786,24 +1231,33 @@ export default function HomePage() {
           <TodoSection
             onDelete={deleteTodo}
             onEdit={beginEdit}
+            onSubtasksChange={updateTodoSubtasks}
             onToggle={toggleTodo}
             pendingIds={pendingIds}
+            pendingSubtaskKeys={pendingSubtaskKeys}
+            registerSubtaskRequest={registerSubtaskRequest}
             title="Overdue"
             todos={visibleSections.overdue}
           />
           <TodoSection
             onDelete={deleteTodo}
             onEdit={beginEdit}
+            onSubtasksChange={updateTodoSubtasks}
             onToggle={toggleTodo}
             pendingIds={pendingIds}
+            pendingSubtaskKeys={pendingSubtaskKeys}
+            registerSubtaskRequest={registerSubtaskRequest}
             title="Pending"
             todos={visibleSections.pending}
           />
           <TodoSection
             onDelete={deleteTodo}
             onEdit={beginEdit}
+            onSubtasksChange={updateTodoSubtasks}
             onToggle={toggleTodo}
             pendingIds={pendingIds}
+            pendingSubtaskKeys={pendingSubtaskKeys}
+            registerSubtaskRequest={registerSubtaskRequest}
             title="Completed"
             todos={visibleSections.completed}
           />

@@ -750,7 +750,40 @@ key; it does not use or change application accounts.
 
 Run `npx playwright install chromium` once to install the browser, then
 `npm run test:e2e:priority`. The suite builds the app and checks priority
-creation/defaults, immediate edit/filter behavior, and measured badge contrast
-in light and dark modes. It uses a temporary database and signed test-session
-fixture; it does not simulate a real passkey ceremony. To use an installed
-Chrome executable instead, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+creation/defaults, immediate edit/filter behavior, measured badge contrast
+in light and dark modes, and subtask checklist progress/persistence. It uses a
+temporary database and signed test-session fixture; it does not simulate a real
+passkey ceremony. To use an installed Chrome executable instead, set
+`PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+
+### PRP05 subtasks
+
+The existing Todo read response (`GET /api/todos` and `GET /api/todos/:id`)
+includes `subtasks` ordered by `position`, then ID; it remains the read contract
+for expanded lists and collapsed progress counts. Each subtask has
+`{id,todo_id,title,completed,position,created_at}`.
+
+`POST /api/todos/:id/subtasks` accepts `{title}` and returns a Subtask with
+status 201. `PUT /api/subtasks/:id` accepts a non-empty subset of
+`{title?,completed?}` and returns the updated Subtask. `DELETE /api/subtasks/:id`
+returns `{success:true}`. All requests require a valid session; mutations also
+require an Origin matching `RP_ORIGIN` (or the request origin when unset).
+Cross-user/missing parent or subtask IDs return 404; invalid JSON, titles, or
+update fields return 400. Checklist completion is independent of the parent.
+
+New positions append at `MAX(position)+1` under an immediate SQLite write
+transaction. Deleting a child leaves sibling positions unchanged. Existing
+subtask tables are migrated transactionally to enforce parent `ON DELETE
+CASCADE`; orphaned rows or schemas with columns that cannot be preserved cause
+startup to fail with an actionable error. A rebuild also refuses unsupported
+foreign keys, custom indexes, and triggers. The migration leaves the original
+table and rows intact rather than deleting, reassigning, or fabricating data.
+Repair the referenced todos/schema, then restart. Progress is
+shared through the pure, client-safe `calculateProgress` helper in
+`lib/subtaskProgress.ts`; it returns `{completed,total,percent}`, with an empty
+list at 0/0/0 and rounded percentages.
+
+Run backend checklist regressions after building with:
+`node --import tsx --test tests/subtask-progress.test.ts tests/subtask-db.test.ts tests/subtask-migration.test.ts tests/subtask-api.test.ts`.
+The API test uses a signed-session fixture and an isolated temporary database;
+it does not simulate a passkey ceremony or add an authentication bypass.
