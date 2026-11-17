@@ -4,11 +4,14 @@ type Priority = "high" | "medium" | "low";
 
 type SortableTodo = {
   completed: boolean;
+  completed_at: string | null;
   created_at: string;
   due_date: string | null;
   priority: Priority;
   updated_at: string | null;
 };
+
+export type PriorityFilter = Priority | "all";
 
 const PRIORITY_ORDER: Record<Priority, number> = {
   high: 0,
@@ -33,6 +36,15 @@ export function sortTodos<T extends SortableTodo>(todos: T[]): T[] {
   });
 }
 
+export function filterTodosByPriority<T extends Pick<SortableTodo, "priority">>(
+  todos: T[],
+  priority: PriorityFilter,
+): T[] {
+  return priority === "all"
+    ? todos
+    : todos.filter((todo) => todo.priority === priority);
+}
+
 export function sectionTodos<T extends SortableTodo>(
   todos: T[],
   now: Date = getSingaporeNow(),
@@ -47,9 +59,11 @@ export function sectionTodos<T extends SortableTodo>(
   const completed = todos
     .filter((todo) => todo.completed)
     .sort(
-      (a, b) =>
-        Date.parse(b.updated_at ?? b.created_at) -
-        Date.parse(a.updated_at ?? a.created_at),
+      (a, b) => {
+        if (a.completed_at === null) return b.completed_at === null ? 0 : 1;
+        if (b.completed_at === null) return -1;
+        return Date.parse(b.completed_at) - Date.parse(a.completed_at);
+      },
     );
 
   return {

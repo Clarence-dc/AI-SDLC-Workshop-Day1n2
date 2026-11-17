@@ -723,6 +723,19 @@ must belong to the same user. Deleting a todo removes its subtasks and tag
 links, not reusable tags. Recurrence/reminder metadata is stored, but generation
 and notification scheduling are not implemented in PRP01.
 
+Todos include server-owned `completed_at: string | null` (UTC ISO). It is null
+until completion, set on the incomplete-to-complete transition, preserved by
+ordinary edits and repeated completion requests, and cleared on uncompletion.
+Re-completion records the new server time. Clients cannot submit this field.
+Completed ordering must use `completed_at`, not mutable `updated_at`.
+On first opening a pre-column database, an atomic migration adds the column
+and backfills completed rows once from `COALESCE(updated_at, created_at)`;
+incomplete rows stay null. This deterministic legacy approximation cannot
+recover historical completion instants. Subsequent opens and edits never
+reconstruct it from `updated_at`.
+Run `node --import tsx --test tests/todo-completion.test.ts` for migration,
+transition, preservation and reopen regressions against an isolated database.
+
 Run backend CRUD regression checks with
 `node --import tsx --test tests/todo-db.test.ts`; they use and remove an isolated
 temporary database. This includes persistence, user isolation, atomic relations,
@@ -732,3 +745,12 @@ After `npm run build`, run
 checks, cross-user access, and request-origin protection. This starts and stops
 its own local production server with an isolated temporary database and signing
 key; it does not use or change application accounts.
+
+### PRP02 priority browser checks
+
+Run `npx playwright install chromium` once to install the browser, then
+`npm run test:e2e:priority`. The suite builds the app and checks priority
+creation/defaults, immediate edit/filter behavior, and measured badge contrast
+in light and dark modes. It uses a temporary database and signed test-session
+fixture; it does not simulate a real passkey ceremony. To use an installed
+Chrome executable instead, set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.

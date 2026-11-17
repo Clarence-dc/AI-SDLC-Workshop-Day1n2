@@ -15,7 +15,11 @@ import {
   getSingaporeNow,
   toSingaporeDateTimeInput,
 } from "@/lib/timezone";
-import { sectionTodos } from "@/lib/todoSort";
+import {
+  filterTodosByPriority,
+  sectionTodos,
+  type PriorityFilter,
+} from "@/lib/todoSort";
 
 type TodoView = Omit<Todo, "user_id"> & { user_id?: number };
 type TodoDraft = {
@@ -25,6 +29,12 @@ type TodoDraft = {
 };
 
 const PRIORITIES: Priority[] = ["high", "medium", "low"];
+const PRIORITY_BADGE_STYLES: Record<Priority, string> = {
+  high: "border-red-500 bg-red-50 text-red-800 dark:border-red-400 dark:bg-red-950 dark:text-red-200",
+  medium:
+    "border-amber-500 bg-amber-50 text-amber-900 dark:border-amber-400 dark:bg-amber-950 dark:text-amber-200",
+  low: "border-blue-500 bg-blue-50 text-blue-800 dark:border-blue-400 dark:bg-blue-950 dark:text-blue-200",
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -40,6 +50,9 @@ function isTodo(value: unknown): value is Todo {
     typeof value.user_id === "number" &&
     typeof value.title === "string" &&
     typeof value.completed === "boolean" &&
+    (value.completed_at === null ||
+      (typeof value.completed_at === "string" &&
+        Number.isFinite(Date.parse(value.completed_at)))) &&
     (value.due_date === null || typeof value.due_date === "string") &&
     (value.priority === "high" ||
       value.priority === "medium" ||
@@ -159,6 +172,18 @@ function PrioritySelect({
   );
 }
 
+function PriorityBadge({ priority }: { priority: Priority }) {
+  const label = priority[0].toUpperCase() + priority.slice(1);
+
+  return (
+    <span
+      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold ${PRIORITY_BADGE_STYLES[priority]}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 function TodoItem({
   todo,
   busy,
@@ -194,9 +219,7 @@ function TodoItem({
             {todo.title}
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <span className="rounded-full border border-gray-300 px-2.5 py-0.5 text-xs font-medium text-gray-700 dark:border-gray-600 dark:text-gray-200">
-              {todo.priority[0].toUpperCase() + todo.priority.slice(1)}
-            </span>
+            <PriorityBadge priority={todo.priority} />
             {todo.due_date && (
               <span className="text-sm text-gray-600 dark:text-gray-300">
                 Due {formatDueDate(todo.due_date)}
@@ -281,6 +304,7 @@ export default function HomePage() {
   const [title, setTitle] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [priority, setPriority] = useState<Priority>("medium");
+  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>("all");
   const [editingTodo, setEditingTodo] = useState<TodoView | null>(null);
   const [editDraft, setEditDraft] = useState<TodoDraft | null>(null);
   const [loading, setLoading] = useState(true);
@@ -355,7 +379,20 @@ export default function HomePage() {
   }, [editingTodo, isSavingEdit]);
 
   const sections = useMemo(() => sectionTodos(todos, now), [todos, now]);
+  const visibleSections = useMemo(
+    () => ({
+      overdue: filterTodosByPriority(sections.overdue, priorityFilter),
+      pending: filterTodosByPriority(sections.pending, priorityFilter),
+      completed: filterTodosByPriority(sections.completed, priorityFilter),
+    }),
+    [priorityFilter, sections],
+  );
   const hasTodos = todos.length > 0;
+  const hasVisibleTodos =
+    visibleSections.overdue.length +
+      visibleSections.pending.length +
+      visibleSections.completed.length >
+    0;
 
   function markTodoPending(id: number, pending: boolean) {
     setPendingIds((current) => {
@@ -392,6 +429,7 @@ export default function HomePage() {
       id: optimisticId,
       title: trimmedTitle,
       completed: false,
+      completed_at: null,
       due_date: dueDateISO,
       priority,
       is_recurring: false,
@@ -445,10 +483,12 @@ export default function HomePage() {
       return;
     }
 
+    const updatedAt = getSingaporeNow().toISOString();
     const optimisticTodo = {
       ...previousTodo,
       completed,
-      updated_at: getSingaporeNow().toISOString(),
+      completed_at: completed ? updatedAt : null,
+      updated_at: updatedAt,
     };
     setError(null);
     markTodoPending(id, true);
@@ -697,6 +737,32 @@ export default function HomePage() {
         </div>
       )}
 
+      <div className="mt-6 flex flex-col gap-1 sm:max-w-xs">
+        <label
+          className="text-sm font-medium text-gray-700 dark:text-gray-200"
+          htmlFor="priority-filter"
+        >
+          Filter by priority
+        </label>
+        <select
+          aria-label="Filter todos by priority"
+          className="min-h-11 rounded-lg border border-gray-300 bg-white px-3 text-gray-900 dark:border-gray-600 dark:bg-gray-800 dark:text-white"
+          id="priority-filter"
+          onChange={(event) => {
+            const value = event.target.value;
+            if (value === "all" || isPriority(value)) {
+              setPriorityFilter(value);
+            }
+          }}
+          value={priorityFilter}
+        >
+          <option value="all">All Priorities</option>
+          <option value="high">High Priority</option>
+          <option value="medium">Medium Priority</option>
+          <option value="low">Low Priority</option>
+        </select>
+      </div>
+
       {loading ? (
         <p className="mt-8 text-gray-600 dark:text-gray-300" role="status">
           Loading todos…
@@ -708,7 +774,14 @@ export default function HomePage() {
         >
           You have no todos yet. Add one above to get started.
         </section>
-      ) : hasTodos ? (
+      ) : hasTodos && !hasVisibleTodos ? (
+        <section
+          aria-live="polite"
+          className="mt-8 rounded-xl border border-dashed border-gray-300 bg-white/70 px-4 py-10 text-center text-gray-600 dark:border-gray-700 dark:bg-gray-800/70 dark:text-gray-300"
+        >
+          No todos match this priority.
+        </section>
+      ) : hasVisibleTodos ? (
         <>
           <TodoSection
             onDelete={deleteTodo}
@@ -716,7 +789,7 @@ export default function HomePage() {
             onToggle={toggleTodo}
             pendingIds={pendingIds}
             title="Overdue"
-            todos={sections.overdue}
+            todos={visibleSections.overdue}
           />
           <TodoSection
             onDelete={deleteTodo}
@@ -724,7 +797,7 @@ export default function HomePage() {
             onToggle={toggleTodo}
             pendingIds={pendingIds}
             title="Pending"
-            todos={sections.pending}
+            todos={visibleSections.pending}
           />
           <TodoSection
             onDelete={deleteTodo}
@@ -732,7 +805,7 @@ export default function HomePage() {
             onToggle={toggleTodo}
             pendingIds={pendingIds}
             title="Completed"
-            todos={sections.completed}
+            todos={visibleSections.completed}
           />
         </>
       ) : null}

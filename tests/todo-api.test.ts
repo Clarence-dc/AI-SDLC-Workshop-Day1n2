@@ -88,6 +88,19 @@ test("authenticated todo HTTP contract, validation and ownership", { timeout: 60
     assert.equal((await request("/api/todos", "POST", "{")).status, 400);
     assert.equal((await request("/api/todos", "POST", '{"title":3}')).status, 400);
     assert.equal((await request("/api/todos", "POST", '{"title":"X","user_id":999}')).status, 400);
+    for (const priority of [undefined, "high", "medium", "low"]) {
+      const created = await request("/api/todos", "POST", JSON.stringify({ title: "Priority contract", priority }));
+      assert.equal(created.status, 201);
+      const createdTodo = await created.json();
+      assert.equal(createdTodo.priority, priority ?? "medium");
+      for (const nextPriority of ["low", "high", "medium"]) {
+        const changed = await request(`/api/todos/${createdTodo.id}`, "PUT", JSON.stringify({ priority: nextPriority }));
+        assert.equal(changed.status, 200);
+        assert.equal((await changed.json()).todo.priority, nextPriority);
+        assert.equal((await (await request(`/api/todos/${createdTodo.id}`)).json()).priority, nextPriority);
+      }
+      assert.equal((await request(`/api/todos/${createdTodo.id}`, "DELETE")).status, 200);
+    }
     const response = await request("/api/todos", "POST", '{"title":"  Created by HTTP  ","priority":"high"}');
     assert.equal(response.status, 201);
     const todo = await response.json();
@@ -114,7 +127,17 @@ test("authenticated todo HTTP contract, validation and ownership", { timeout: 60
     }
     assert.deepEqual(await (await request("/api/todos", "GET", undefined, otherCookie)).json(), []);
     assert.equal((await request("/api/todos/1junk")).status, 404);
-    assert.equal((await request(`/api/todos/${todo.id}`, "PUT", '{"priority":null}')).status, 400);
+    for (const priority of [null, "urgent", "HIGH", "", 0, true, [], {}]) {
+      const before = await (await request("/api/todos")).json();
+      const rejectedCreate = await request("/api/todos", "POST", JSON.stringify({ title: "Rejected", priority }));
+      assert.equal(rejectedCreate.status, 400);
+      assert.match((await rejectedCreate.json()).error, /priority/i);
+      assert.deepEqual(await (await request("/api/todos")).json(), before);
+      const rejectedUpdate = await request(`/api/todos/${todo.id}`, "PUT", JSON.stringify({ title: "Must not change", priority }));
+      assert.equal(rejectedUpdate.status, 400);
+      assert.match((await rejectedUpdate.json()).error, /priority/i);
+      assert.deepEqual(await (await request("/api/todos")).json(), before);
+    }
     const updated = await (await request(`/api/todos/${todo.id}`, "PUT", '{"completed":true}')).json();
     assert.equal(updated.todo.completed, true);
     assert.equal(updated.todo.title, todo.title);

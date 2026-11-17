@@ -27,6 +27,7 @@ test("CRUD preserves defaults, isolates ownership, persists and merges partial u
   assert.equal(created.title, "Persist this");
   assert.equal(created.priority, "medium");
   assert.equal(created.completed, false);
+  assert.equal(created.completed_at, null);
   assert.equal(created.due_date, null);
   assert.deepEqual(created.subtasks, []);
   assert.deepEqual(created.tags, []);
@@ -99,6 +100,7 @@ test("due dates enforce the exact sixty-second boundary and reject impossible da
   }
   const existing: Todo = {
     id: 1, user_id: 1, title: "Overdue", completed: false,
+    completed_at: null,
     due_date: "2020-01-01T00:00:00.000Z", priority: "medium", is_recurring: false,
     recurrence_pattern: null, reminder_minutes: null, last_notification_sent: null,
     created_at: "2019-01-01T00:00:00.000Z", updated_at: null,

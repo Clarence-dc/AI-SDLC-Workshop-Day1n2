@@ -28,6 +28,7 @@ export interface Todo {
   user_id: number;
   title: string;
   completed: boolean;
+  completed_at: string | null;
   due_date: string | null;
   priority: Priority;
   is_recurring: boolean;
@@ -134,6 +135,7 @@ function database(): Database.Database {
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0,1)),
+      completed_at TEXT,
       due_date TEXT,
       priority TEXT NOT NULL DEFAULT 'medium' CHECK(priority IN ('high','medium','low')),
       is_recurring INTEGER NOT NULL DEFAULT 0 CHECK(is_recurring IN (0,1)),
@@ -170,6 +172,16 @@ function database(): Database.Database {
     );
     CREATE INDEX IF NOT EXISTS idx_todo_tags_tag_id ON todo_tags(tag_id);
   `);
+  db.transaction(() => {
+    const columns = db.pragma("table_info(todos)") as Array<{ name: string }>;
+    if (!columns.some(({ name }) => name === "completed_at")) {
+      db.exec(`
+        ALTER TABLE todos ADD COLUMN completed_at TEXT;
+        UPDATE todos SET completed_at = COALESCE(updated_at, created_at)
+        WHERE completed = 1;
+      `);
+    }
+  }).immediate();
   connection = db;
   return db;
 }
@@ -337,17 +349,21 @@ export const todoDB = {
       if (!existing) return undefined;
       const changes = validateTodoInput(input, existing);
       const merged = { ...existing, ...changes };
+      const now = getSingaporeNow().toISOString();
+      const completedAt = merged.completed
+        ? (existing.completed ? existing.completed_at : now)
+        : null;
       const reminderChanged = merged.due_date !== existing.due_date
         || merged.reminder_minutes !== existing.reminder_minutes;
       db.prepare(`
-        UPDATE todos SET title = ?, completed = ?, due_date = ?, priority = ?,
+        UPDATE todos SET title = ?, completed = ?, completed_at = ?, due_date = ?, priority = ?,
           is_recurring = ?, recurrence_pattern = ?, reminder_minutes = ?,
           last_notification_sent = ?, updated_at = ?
         WHERE id = ? AND user_id = ?
-      `).run(merged.title, merged.completed ? 1 : 0, merged.due_date, merged.priority,
+      `).run(merged.title, merged.completed ? 1 : 0, completedAt, merged.due_date, merged.priority,
         merged.is_recurring ? 1 : 0, merged.recurrence_pattern, merged.reminder_minutes,
         reminderChanged ? null : existing.last_notification_sent,
-        getSingaporeNow().toISOString(), id, userId);
+        now, id, userId);
       if (changes.tag_ids !== undefined) setTodoTags(id, userId, changes.tag_ids);
       return this.findById(id, userId);
     })();
